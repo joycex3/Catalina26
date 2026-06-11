@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Cost Splitter</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.x/dist/tabler-icons.min.css" />
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <style>
     :root {
       --bg: #f7f7f8;
@@ -288,7 +288,7 @@ function showToast(msg){
 
 // ---- Load from Supabase ----
 async function loadData() {
-  const { data: costsData, error } = await supabase
+  const { data: costsData, error } = await db
     .from('Costs')
     .select('*')
     .order('id', { ascending: true });
@@ -317,7 +317,7 @@ async function loadData() {
     }));
 
   // Load people list
-  const { data: peopleData } = await supabase
+  const { data: peopleData } = await db
     .from('Costs')
     .select('description')
     .like('description', '__person__%')
@@ -329,7 +329,7 @@ async function loadData() {
 }
 
 // ---- Realtime subscription ----
-supabase
+db
   .channel('costs-changes')
   .on('postgres_changes', { event: '*', schema: 'public', table: 'Costs' }, () => {
     loadData();
@@ -355,7 +355,7 @@ async function removePerson(name){
   if(expenses.some(e=>e.payer===name||e.participants.includes(name))){
     alert(`${name} is part of an expense. Remove those expenses first.`);return;
   }
-  const { error } = await supabase
+  const { error } = await db
     .from('Costs')
     .delete()
     .eq('description', '__person__' + name);
