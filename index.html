@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Cost Splitter</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.x/dist/tabler-icons.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
     :root {
       --bg: #f7f7f8;
@@ -174,9 +175,14 @@
       white-space: nowrap; z-index: 999; box-shadow: var(--shadow);
     }
     .toast.show { opacity: 1; }
+    .sync-indicator {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 12px; color: var(--text-secondary);
+      padding: 4px 10px; background: var(--green-bg);
+      border-radius: 999px; color: var(--green-dark);
+    }
     @media (max-width: 480px) {
       .form-grid { grid-template-columns: 1fr; }
-      .export-grid { grid-template-columns: 1fr; }
       .stat-grid { grid-template-columns: repeat(3,1fr); }
       header .subtitle { display: none; }
     }
@@ -187,7 +193,7 @@
 <header>
   <i class="ti ti-calculator" style="font-size:22px;color:var(--green);"></i>
   <h1>Cost Splitter</h1>
-  <span class="subtitle">Split expenses fairly among friends</span>
+  <span class="subtitle"><span class="sync-indicator"><i class="ti ti-cloud"></i> Live sync</span></span>
 </header>
 
 <div class="container">
@@ -200,7 +206,7 @@
         <button class="primary" onclick="addPerson()"><i class="ti ti-plus"></i> Add</button>
       </div>
       <div class="chip-row" id="people-list">
-        <span style="font-size:13px;color:var(--text-secondary);">No people added yet</span>
+        <span style="font-size:13px;color:var(--text-secondary);">Loading...</span>
       </div>
     </div>
   </div>
@@ -244,7 +250,7 @@
   <div class="section">
     <div class="section-label">Expenses</div>
     <div id="expenses-section">
-      <div class="card"><div class="empty-state"><i class="ti ti-receipt"></i>No expenses yet</div></div>
+      <div class="card"><div class="empty-state"><i class="ti ti-receipt"></i>Loading...</div></div>
     </div>
   </div>
 
@@ -255,13 +261,16 @@
       <div class="card"><div class="empty-state"><i class="ti ti-chart-pie"></i>Add people and expenses to see balances</div></div>
     </div>
   </div>
-
-
 </div>
 
 <div class="toast" id="toast"></div>
 
 <script>
+// ---- Supabase Setup ----
+const SUPABASE_URL = 'https://pjqfjncgknzudupxagqc.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_rqAxekz9bsoP75pmlTZbiw_2XdNGZhx';
+const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
 const COLORS=['#1D9E75','#185FA5','#D85A30','#534AB7','#BA7517','#993556','#3B6D11','#993C1D'];
 const BKGS  =['#E1F5EE','#E6F1FB','#FAECE7','#EEEDFE','#FAEEDA','#FBEAF0','#EAF3DE','#FAECE7'];
 let people=[], expenses=[], selectedParticipants=new Set(), summaryTab='breakdown';
@@ -277,38 +286,80 @@ function showToast(msg){
   setTimeout(()=>t.classList.remove('show'),2500);
 }
 
-function tryLoadFromUrl(){
-  try{
-    const params=new URLSearchParams(window.location.search);
-    const d=params.get('d');
-    if(!d) return false;
-    const data=decodeTrip(d);
-    if(!data?.people) return false;
-    people=data.people||[];
-    expenses=data.expenses||[];
-    selectedParticipants=new Set(people);
-    const banner=document.getElementById('load-banner');
-    banner.style.display='flex';
-    document.getElementById('load-banner-text').textContent=
-      `Loaded shared trip with ${people.length} people and ${expenses.length} expense(s). Add more and re-share!`;
-    return true;
-  }catch(e){return false;}
+// ---- Load from Supabase ----
+async function loadData() {
+  const { data: costsData, error } = await supabase
+    .from('costs')
+    .select('*')
+    .order('id', { ascending: true });
+
+  if (error) { showToast('Error loading data'); console.error(error); return; }
+
+  // Extract unique people from name + participants fields
+  const peopleSet = new Set();
+  costsData.forEach(row => {
+    if (row.name) peopleSet.add(row.name);
+    if (row.description && row.description.startsWith('__person__')) {
+      peopleSet.add(row.description.replace('__person__', ''));
+    }
+  });
+
+  // Separate people entries from expense entries
+  expenses = costsData
+    .filter(row => !row.description.startsWith('__person__'))
+    .map(row => ({
+      id: row.id,
+      desc: row.description,
+      amt: row.amount,
+      payer: row.name,
+      participants: JSON.parse(row.participants || '[]'),
+      shares: JSON.parse(row.shares || '{}'),
+    }));
+
+  // Load people list
+  const { data: peopleData } = await supabase
+    .from('costs')
+    .select('description')
+    .like('description', '__person__%')
+    .order('id', { ascending: true });
+
+  people = (peopleData || []).map(r => r.description.replace('__person__', ''));
+  selectedParticipants = new Set(people);
+  render();
 }
 
+// ---- Realtime subscription ----
+supabase
+  .channel('costs-changes')
+  .on('postgres_changes', { event: '*', schema: 'public', table: 'costs' }, () => {
+    loadData();
+  })
+  .subscribe();
+
 // ---- People ----
-function addPerson(){
+async function addPerson(){
   const inp=document.getElementById('person-input');
   const name=inp.value.trim();
   if(!name||people.includes(name)){if(people.includes(name))showToast('Already added');return;}
-  people.push(name); selectedParticipants.add(name); inp.value='';
-  render();
+  inp.value='';
+
+  const { error } = await db.from('costs').insert({
+    description: '__person__' + name,
+    amount: 0,
+    name: name
+  });
+  if (error) { showToast('Error adding person'); console.error(error); }
 }
-function removePerson(name){
+
+async function removePerson(name){
   if(expenses.some(e=>e.payer===name||e.participants.includes(name))){
     alert(`${name} is part of an expense. Remove those expenses first.`);return;
   }
-  people=people.filter(p=>p!==name); selectedParticipants.delete(name);
-  render();
+  const { error } = await supabase
+    .from('costs')
+    .delete()
+    .eq('description', '__person__' + name);
+  if (error) { showToast('Error removing person'); console.error(error); }
 }
 
 // ---- Participants ----
@@ -336,7 +387,7 @@ function renderCustomAmounts(){
 }
 
 // ---- Add expense ----
-function addExpense(){
+async function addExpense(){
   const desc=document.getElementById('exp-desc').value.trim();
   const amt=parseFloat(document.getElementById('exp-amt').value);
   const payer=document.getElementById('exp-payer').value;
@@ -354,16 +405,27 @@ function addExpense(){
     const total=Object.values(shares).reduce((a,b)=>a+b,0);
     if(Math.abs(total-amt)>0.01){showToast(`Amounts $${total.toFixed(2)} ≠ total $${amt.toFixed(2)}`);return;}
   }
-  expenses.push({id:Date.now(),desc,amt,payer,participants,shares});
+
+  const { error } = await db.from('costs').insert({
+    description: desc,
+    amount: amt,
+    name: payer,
+    participants: JSON.stringify(participants),
+    shares: JSON.stringify(shares)
+  });
+
+  if (error) { showToast('Error adding expense'); console.error(error); return; }
+
   document.getElementById('exp-desc').value='';
   document.getElementById('exp-amt').value='';
   selectedParticipants=new Set(people);
-  render();
   showToast('Expense added!');
 }
-function removeExpense(id){
+
+async function removeExpense(id){
   if(!confirm('Remove this expense?'))return;
-  expenses=expenses.filter(e=>e.id!==id); render();
+  const { error } = await db.from('costs').delete().eq('id', id);
+  if (error) { showToast('Error removing expense'); console.error(error); }
 }
 
 // ---- Calculations ----
@@ -518,7 +580,7 @@ function setTab(t){
 }
 
 // Init
-render();
+loadData();
 </script>
 </body>
 </html>
